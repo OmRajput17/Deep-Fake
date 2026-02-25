@@ -3,10 +3,6 @@
 
 # Processed data (too large for git)
 processed_faces/
-data_list/
-
-# Model checkpoints (too large for git)
-output/
 
 # Python cache
 __pycache__/
