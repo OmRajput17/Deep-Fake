@@ -20,5 +20,8 @@ build/
 Thumbs.db
 .DS_Store
 
+# Epoch checkpoints (only keep best.pth)
+output/*/epoch_*.pth
+
 # Dataset (never commit raw data)
 FaceForensics++_C23/
