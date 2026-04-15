@@ -23,5 +23,9 @@ Thumbs.db
 # Epoch checkpoints (only keep best.pth)
 output/*/epoch_*.pth
 
+# Pipeline outputs
+results/
+predictions/
+
 # Dataset (never commit raw data)
 FaceForensics++_C23/

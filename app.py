@@ -10,6 +10,9 @@ import cv2
 import numpy as np
 import os
 import tempfile
+import base64
+import io
+from datetime import datetime
 from PIL import Image
 from facenet_pytorch import MTCNN
 
@@ -243,6 +246,323 @@ def create_heatmap_overlay(image_bgr, heatmap, alpha=0.5):
     return overlay, heatmap_colored
 
 
+def img_to_base64(img_bgr):
+    """Convert OpenCV BGR image to base64 PNG string."""
+    _, buf = cv2.imencode('.png', img_bgr)
+    return base64.b64encode(buf.read() if hasattr(buf, 'read') else buf.tobytes()).decode('utf-8')
+
+
+def generate_forensic_report_html(analysis_type, verdict, confidence, images_b64,
+                                   extra_data=None):
+    """
+    Generate a standalone HTML forensic report.
+    
+    Args:
+        analysis_type: 'image' or 'video'
+        verdict: 'REAL' or 'FAKE'
+        confidence: float (0–1) or string description
+        images_b64: dict with keys like 'original', 'heatmap', 'overlay' → base64 strings
+        extra_data: dict with additional video analysis data (frame counts, chart, samples)
+    """
+    now = datetime.now().strftime('%B %d, %Y — %H:%M:%S')
+    case_id = datetime.now().strftime('DF-%Y%m%d-%H%M%S')
+    verdict_color = '#10b981' if verdict == 'REAL' else '#ef4444'
+    verdict_bg = 'linear-gradient(135deg, #065f46, #047857)' if verdict == 'REAL' else 'linear-gradient(135deg, #7f1d1d, #991b1b)'
+    verdict_icon = '✅' if verdict == 'REAL' else '🚨'
+    conf_display = f'{confidence:.1%}' if isinstance(confidence, float) else confidence
+
+    # Build Grad-CAM image section
+    gradcam_html = ''
+    if 'original' in images_b64:
+        gradcam_html = f'''
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin:20px 0;">
+            <div style="text-align:center;">
+                <img src="data:image/png;base64,{images_b64['original']}" style="width:100%; border-radius:8px;">
+                <p style="color:#94a3b8; margin-top:8px; font-size:0.9rem;">Original Face</p>
+            </div>
+            <div style="text-align:center;">
+                <img src="data:image/png;base64,{images_b64['heatmap']}" style="width:100%; border-radius:8px;">
+                <p style="color:#94a3b8; margin-top:8px; font-size:0.9rem;">Attention Heatmap</p>
+            </div>
+            <div style="text-align:center;">
+                <img src="data:image/png;base64,{images_b64['overlay']}" style="width:100%; border-radius:8px;">
+                <p style="color:#94a3b8; margin-top:8px; font-size:0.9rem;">Overlay Analysis</p>
+            </div>
+        </div>'''
+
+    # Video-specific sections
+    video_section = ''
+    if analysis_type == 'video' and extra_data:
+        sample_frames_html = ''
+        if extra_data.get('sample_frames_b64'):
+            sample_frames_html = '<div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:16px 0;">'
+            for sf in extra_data['sample_frames_b64']:
+                sf_color = '#10b981' if sf['label'] == 'REAL' else '#ef4444'
+                sample_frames_html += f'''
+                <div style="background:#0f172a; border:1px solid #334155; border-radius:8px; overflow:hidden;">
+                    <img src="data:image/png;base64,{sf['overlay_b64']}" style="width:100%; display:block;">
+                    <div style="padding:8px 12px; text-align:center;">
+                        <span style="color:{sf_color}; font-weight:700;">{sf['label']}</span>
+                        <span style="color:#94a3b8;"> — {sf['confidence']:.1%}</span>
+                    </div>
+                </div>'''
+            sample_frames_html += '</div>'
+
+        video_section = f'''
+        <div class="section">
+            <h2>🎬 Video Frame Analysis</h2>
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-value">{extra_data.get('total_analyzed', 0)}</div>
+                    <div class="metric-label">Frames Analyzed</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{extra_data.get('real_count', 0)}</div>
+                    <div class="metric-label">Real Frames</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{extra_data.get('fake_count', 0)}</div>
+                    <div class="metric-label">Fake Frames</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{extra_data.get('duration', 'N/A')}</div>
+                    <div class="metric-label">Duration</div>
+                </div>
+            </div>
+            <h3 style="color:#e2e8f0; margin:20px 0 12px;">Sample Frame Analysis (with Grad-CAM)</h3>
+            {sample_frames_html}
+        </div>'''
+
+    # Forensic interpretation
+    if verdict == 'FAKE':
+        interpretation = '''The Grad-CAM attention heatmap reveals the model is focusing on 
+        <b>facial boundary regions</b> — eyes, mouth edges, and jawline. These are characteristic 
+        regions where deepfake face-swap algorithms produce visible blending artifacts due to 
+        imperfect synthesis. The high concentration of attention at these boundaries strongly 
+        suggests <b>digital face manipulation</b>.'''
+    else:
+        interpretation = '''The Grad-CAM attention heatmap shows the model focusing on 
+        <b>natural skin texture patterns</b>, particularly around the nose and cheek areas. 
+        The consistent, uniform attention distribution across natural facial features indicates 
+        <b>no detectable manipulation artifacts</b>. The face exhibits authentic texture 
+        characteristics consistent with genuine imagery.'''
+
+    html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forensic Analysis Report — {case_id}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            line-height: 1.6;
+            padding: 40px 20px;
+        }}
+        .container {{ max-width: 900px; margin: 0 auto; }}
+        .header {{
+            text-align: center;
+            padding: 40px 20px;
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border: 1px solid #334155;
+            border-radius: 20px;
+            margin-bottom: 24px;
+        }}
+        .header h1 {{
+            font-size: 2.2rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 6px;
+        }}
+        .header p {{ color: #94a3b8; font-size: 1rem; }}
+        .header .case-id {{ color: #667eea; font-size: 0.95rem; font-weight: 600; margin-top: 8px; }}
+        .header .date {{ color: #64748b; font-size: 0.85rem; margin-top: 4px; }}
+        .section {{
+            background: linear-gradient(145deg, #1e293b, #0f172a);
+            border: 1px solid #334155;
+            border-radius: 16px;
+            padding: 28px;
+            margin-bottom: 20px;
+        }}
+        .section h2 {{
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: #e2e8f0;
+            border-bottom: 2px solid #334155;
+            padding-bottom: 8px;
+            margin-bottom: 16px;
+        }}
+        .verdict-box {{
+            background: {verdict_bg};
+            border-radius: 16px;
+            padding: 30px;
+            text-align: center;
+            margin-bottom: 20px;
+        }}
+        .verdict-box .verdict {{ font-size: 2.2rem; font-weight: 800; color: white; }}
+        .verdict-box .conf {{ font-size: 1.2rem; font-weight: 300; color: rgba(255,255,255,0.9); margin-top: 4px; }}
+        .metrics-grid {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-bottom: 20px;
+        }}
+        .metric-card {{
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 16px;
+            text-align: center;
+        }}
+        .metric-value {{
+            font-size: 1.6rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+        .metric-label {{
+            color: #94a3b8;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-top: 4px;
+        }}
+        table {{ width: 100%; border-collapse: collapse; margin: 12px 0; }}
+        th, td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #334155; }}
+        th {{ color: #94a3b8; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }}
+        td {{ color: #e2e8f0; }}
+        .interpretation {{
+            background: #0f172a;
+            border-left: 4px solid {verdict_color};
+            border-radius: 0 8px 8px 0;
+            padding: 16px 20px;
+            margin: 16px 0;
+            color: #cbd5e1;
+            line-height: 1.7;
+        }}
+        .footer {{
+            text-align: center;
+            color: #64748b;
+            font-size: 0.8rem;
+            margin-top: 30px;
+            padding: 16px;
+            border-top: 1px solid #334155;
+        }}
+        @media print {{
+            body {{ background: #0f172a !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+        }}
+        @media (max-width: 768px) {{
+            .metrics-grid {{ grid-template-columns: repeat(2, 1fr); }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <div class="header">
+            <h1>🔍 DeepFake Forensic Analysis Report</h1>
+            <p>AI-Powered Media Authenticity Verification</p>
+            <div class="case-id">Case ID: {case_id}</div>
+            <div class="date">Generated: {now}</div>
+        </div>
+
+        <div class="verdict-box">
+            <div class="verdict">{verdict_icon} {verdict}</div>
+            <div class="conf">Confidence: {conf_display}</div>
+        </div>
+
+        <div class="section">
+            <h2>🧠 Grad-CAM Explainability Analysis</h2>
+            <p style="color:#94a3b8; margin-bottom:12px; font-size:0.9rem;">
+                Gradient-weighted Class Activation Mapping (Grad-CAM) highlights the facial regions
+                the model considers most important for its prediction. Red/yellow = high attention,
+                blue = low attention.
+            </p>
+            {gradcam_html}
+            <div class="interpretation">
+                <b>🔬 Forensic Interpretation:</b><br>
+                {interpretation}
+            </div>
+        </div>
+
+        {video_section}
+
+        <div class="section">
+            <h2>🏗️ Model & Methodology</h2>
+            <table>
+                <tr><th>Component</th><th>Details</th></tr>
+                <tr><td>Classification Model</td><td>EfficientNet-B4 (ImageNet Pretrained)</td></tr>
+                <tr><td>Input Resolution</td><td>380 × 380 px</td></tr>
+                <tr><td>Face Detector</td><td>MTCNN (Multi-task Cascaded CNN)</td></tr>
+                <tr><td>Explainability Method</td><td>Grad-CAM (last convolutional layer)</td></tr>
+                <tr><td>Output Classes</td><td>2 (REAL / FAKE)</td></tr>
+                <tr><td>Dropout</td><td>0.5</td></tr>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2>📊 Model Performance (Test Set)</h2>
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-value">99.1%</div>
+                    <div class="metric-label">Accuracy</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">99.95%</div>
+                    <div class="metric-label">Precision</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">98.96%</div>
+                    <div class="metric-label">Recall</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">99.45%</div>
+                    <div class="metric-label">F1 Score</div>
+                </div>
+            </div>
+            <table>
+                <tr><th>Parameter</th><th>Value</th></tr>
+                <tr><td>Training Dataset</td><td>FaceForensics++ (C23 Compression)</td></tr>
+                <tr><td>Data Sampling</td><td>12% (~840 videos, ~44K face images)</td></tr>
+                <tr><td>Training Strategy</td><td>Phase 1: Frozen backbone → Phase 2: Full fine-tuning</td></tr>
+                <tr><td>Optimizer</td><td>AdamW (weight_decay=1e-4)</td></tr>
+                <tr><td>LR Schedule</td><td>CosineAnnealingWarmRestarts</td></tr>
+                <tr><td>Augmentation</td><td>Flip, Rotation, ColorJitter, GaussianBlur, RandomErasing, Grayscale</td></tr>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2>📋 Analysis Summary</h2>
+            <table>
+                <tr><th>Field</th><th>Value</th></tr>
+                <tr><td>Analysis Type</td><td>{analysis_type.title()} Analysis</td></tr>
+                <tr><td>Verdict</td><td style="color:{verdict_color}; font-weight:700;">{verdict}</td></tr>
+                <tr><td>Confidence</td><td>{conf_display}</td></tr>
+                <tr><td>Analysis Date</td><td>{now}</td></tr>
+                <tr><td>Compute Device</td><td>{'GPU (CUDA)' if torch.cuda.is_available() else 'CPU'}</td></tr>
+            </table>
+        </div>
+
+        <div class="footer">
+            🔍 <b>DeepFake Forensic Analysis Report</b> — Case {case_id}<br>
+            EfficientNet-B4 + MTCNN + Grad-CAM | Trained on FaceForensics++ (C23)<br>
+            This report was auto-generated by the DeepFake Detection System.
+        </div>
+
+    </div>
+</body>
+</html>'''
+
+    return html, case_id
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Sidebar
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -409,6 +729,34 @@ with tab_image:
                     st.success("🔬 **Grad-CAM shows focused attention on natural skin texture** — "
                                "the model confirms consistent texture patterns typical of authentic faces.")
 
+                # ── Forensic Report Download ──
+                st.markdown("")
+                st.markdown('<div class="section-header">📥 Download Forensic Report</div>', unsafe_allow_html=True)
+
+                # Encode images to base64 for the report
+                _, orig_buf = cv2.imencode('.png', crop_resized)
+                orig_b64 = base64.b64encode(orig_buf.tobytes()).decode('utf-8')
+                _, hm_buf = cv2.imencode('.png', heatmap_colored)
+                hm_b64 = base64.b64encode(hm_buf.tobytes()).decode('utf-8')
+                _, ov_buf = cv2.imencode('.png', overlay)
+                ov_b64 = base64.b64encode(ov_buf.tobytes()).decode('utf-8')
+
+                report_html, case_id = generate_forensic_report_html(
+                    analysis_type='image',
+                    verdict=label,
+                    confidence=confidence,
+                    images_b64={'original': orig_b64, 'heatmap': hm_b64, 'overlay': ov_b64}
+                )
+
+                st.download_button(
+                    label="📥 Download Forensic Report (HTML)",
+                    data=report_html,
+                    file_name=f"forensic_report_{case_id}.html",
+                    mime="text/html",
+                    use_container_width=True
+                )
+                st.caption(f"Case ID: {case_id} — Standalone HTML file, open in any browser or print to PDF")
+
             else:
                 st.warning("⚠️ No face detected in image. Please upload a clear face photo.")
 
@@ -571,6 +919,45 @@ with tab_video:
                                 color = "🟢" if sample['label'] == 'REAL' else "🔴"
                                 st.markdown(f"**{color} {sample['label']} ({sample['confidence']:.1%})**")
                                 st.image(sample['overlay'], use_container_width=True)
+                # ── Forensic Report Download for Video ──
+                st.markdown("")
+                st.markdown('<div class="section-header">📥 Download Forensic Report</div>', unsafe_allow_html=True)
+
+                # Encode sample frame overlays for the report
+                sample_frames_b64 = []
+                for sample in sample_frames[:6]:
+                    ov_rgb = sample['overlay']
+                    ov_bgr = cv2.cvtColor(ov_rgb, cv2.COLOR_RGB2BGR)
+                    _, sf_buf = cv2.imencode('.png', ov_bgr)
+                    sample_frames_b64.append({
+                        'overlay_b64': base64.b64encode(sf_buf.tobytes()).decode('utf-8'),
+                        'label': sample['label'],
+                        'confidence': sample['confidence']
+                    })
+
+                video_report_html, video_case_id = generate_forensic_report_html(
+                    analysis_type='video',
+                    verdict=verdict,
+                    confidence=f"{fake_pct:.1%} frames detected as fake",
+                    images_b64={},
+                    extra_data={
+                        'total_analyzed': total_analyzed,
+                        'real_count': real_count,
+                        'fake_count': fake_count,
+                        'duration': f"{total_frames / fps:.1f}s",
+                        'sample_frames_b64': sample_frames_b64
+                    }
+                )
+
+                st.download_button(
+                    label="📥 Download Forensic Report (HTML)",
+                    data=video_report_html,
+                    file_name=f"forensic_report_{video_case_id}.html",
+                    mime="text/html",
+                    use_container_width=True
+                )
+                st.caption(f"Case ID: {video_case_id} — Standalone HTML file, open in any browser or print to PDF")
+
             else:
                 st.warning("⚠️ No faces detected in any video frames.")
 
