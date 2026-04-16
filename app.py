@@ -112,6 +112,14 @@ st.markdown("""
         text-align: center;
         color: white;
     }
+    .verdict-uncertain {
+        background: linear-gradient(135deg, #78350f, #92400e);
+        border-left: 5px solid #f59e0b;
+        border-radius: 12px;
+        padding: 24px;
+        text-align: center;
+        color: white;
+    }
     .verdict-text {
         font-size: 2rem;
         font-weight: 800;
@@ -253,7 +261,7 @@ with st.sidebar:
     # Model path
     model_path = st.text_input(
         "Model Path",
-        value="./output/ff_effnet_v1/best.pth",
+        value="./output/ff_effnet_v2/best.pth",
         help="Path to the trained model weights"
     )
 
@@ -262,6 +270,20 @@ with st.sidebar:
         st.success("✅ Model found")
     else:
         st.error("❌ Model not found")
+
+    st.divider()
+
+    st.markdown("### 🎚️ Detection Thresholds")
+    fake_threshold = st.slider(
+        "Fake confidence threshold",
+        min_value=0.5, max_value=0.95, value=0.70, step=0.05,
+        help="Minimum confidence to classify as FAKE. Higher = fewer false positives."
+    )
+    verdict_ratio = st.slider(
+        "Video verdict ratio",
+        min_value=0.3, max_value=0.9, value=0.60, step=0.05,
+        help="% of frames needed as FAKE for video verdict"
+    )
 
     st.divider()
 
@@ -341,14 +363,31 @@ with tab_image:
                     crop_resized, model, gradcam, preprocess, device
                 )
 
+                # Apply threshold
+                fake_prob = confidence if label == 'FAKE' else (1 - confidence)
+                if fake_prob >= fake_threshold:
+                    label = 'FAKE'
+                    confidence = fake_prob
+                elif fake_prob <= (1 - fake_threshold):
+                    label = 'REAL'
+                    confidence = 1 - fake_prob
+                else:
+                    label = 'UNCERTAIN'
+                    confidence = max(fake_prob, 1 - fake_prob)
+
                 # Create overlay
                 overlay, heatmap_colored = create_heatmap_overlay(crop_resized, heatmap)
 
                 # ── Verdict ──
-                verdict_class = "verdict-real" if label == "REAL" else "verdict-fake"
+                if label == 'REAL':
+                    verdict_class, verdict_icon = 'verdict-real', '✅ REAL'
+                elif label == 'FAKE':
+                    verdict_class, verdict_icon = 'verdict-fake', '🚨 FAKE'
+                else:
+                    verdict_class, verdict_icon = 'verdict-uncertain', '⚠️ UNCERTAIN'
                 st.markdown(f"""
                 <div class="{verdict_class}">
-                    <div class="verdict-text">{'✅ REAL' if label == 'REAL' else '🚨 FAKE'}</div>
+                    <div class="verdict-text">{verdict_icon}</div>
                     <div class="confidence-text">Confidence: {confidence:.1%}</div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -441,7 +480,7 @@ with tab_video:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = cap.get(cv2.CAP_PROP_FPS)
 
-            real_count = fake_count = 0
+            real_count = fake_count = uncertain_count = 0
             frame_results = []
             sample_frames = []
             frame_skip = max(1, int(fps / 3))  # ~3 frames per second
@@ -463,10 +502,20 @@ with tab_video:
                             crop_resized, model, gradcam, preprocess, device
                         )
 
-                        if label == "FAKE":
+                        # Apply threshold
+                        fake_prob = conf if label == 'FAKE' else (1 - conf)
+                        if fake_prob >= fake_threshold:
+                            label = 'FAKE'
+                            conf = fake_prob
                             fake_count += 1
-                        else:
+                        elif fake_prob <= (1 - fake_threshold):
+                            label = 'REAL'
+                            conf = 1 - fake_prob
                             real_count += 1
+                        else:
+                            label = 'UNCERTAIN'
+                            conf = max(fake_prob, 1 - fake_prob)
+                            uncertain_count += 1
 
                         frame_results.append({
                             'frame': frame_idx,
@@ -496,9 +545,9 @@ with tab_video:
             progress_bar.empty()
 
             if frame_results:
-                total_analyzed = real_count + fake_count
+                total_analyzed = real_count + fake_count + uncertain_count
                 fake_pct = fake_count / total_analyzed if total_analyzed else 0
-                verdict = "FAKE" if fake_count > real_count else "REAL"
+                verdict = "FAKE" if fake_pct >= verdict_ratio else "REAL"
 
                 # ── Verdict ──
                 verdict_class = "verdict-real" if verdict == "REAL" else "verdict-fake"

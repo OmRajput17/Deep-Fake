@@ -19,6 +19,8 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.cuda.amp import GradScaler, autocast
 import argparse
 import os
+import csv
+import sys
 import numpy as np
 
 from network.models import model_selection
@@ -53,7 +55,7 @@ def main():
 
     # Balanced sampling
     sampler = make_balanced_sampler(train_dataset)
-    num_workers = 4 if torch.cuda.is_available() else 0
+    num_workers = 2 if torch.cuda.is_available() else 0
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
                               sampler=sampler, num_workers=num_workers,
                               pin_memory=True, persistent_workers=num_workers > 0)
@@ -82,6 +84,29 @@ def main():
     best_wts = None
     patience_counter = 0
     unfreeze_epoch = 2  # Unfreeze backbone after 2 epochs
+
+    # ── Logging setup ──
+    history_file = os.path.join(output_path, 'training_history.csv')
+    log_file = os.path.join(output_path, 'training_log.txt')
+
+    # Write CSV header
+    with open(history_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['epoch', 'train_loss', 'train_acc', 'val_loss', 'val_acc', 'lr', 'best_acc'])
+
+    # Tee stdout to log file
+    class Tee:
+        def __init__(self, file_path):
+            self.file = open(file_path, 'w', encoding='utf-8')
+            self.stdout = sys.stdout
+        def write(self, data):
+            self.stdout.write(data)
+            self.file.write(data)
+            self.file.flush()
+        def flush(self):
+            self.stdout.flush()
+            self.file.flush()
+    sys.stdout = Tee(log_file)
 
     for epoch in range(args.epoches):
         # Unfreeze backbone after warmup
@@ -147,6 +172,19 @@ def main():
 
         scheduler.step()
 
+        # ── Save history to CSV ──
+        with open(history_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                epoch + 1,
+                f'{train_loss/train_total:.4f}',
+                f'{train_acc:.4f}',
+                f'{val_loss/val_total:.4f}',
+                f'{val_acc:.4f}',
+                f'{optimizer.param_groups[0]["lr"]:.6f}',
+                f'{best_acc:.4f}'
+            ])
+
         # Save checkpoint
         m = model.module if isinstance(model, nn.DataParallel) else model
         torch.save(m.state_dict(), os.path.join(output_path, f'epoch_{epoch}.pth'))
@@ -169,6 +207,8 @@ def main():
 
     print(f'\n🏆 Best Val Accuracy: {best_acc:.4f}')
     print(f'✅ Best model: {output_path}/best.pth')
+    print(f'📊 History: {history_file}')
+    print(f'📝 Log: {log_file}')
 
 
 if __name__ == '__main__':
